@@ -1,0 +1,94 @@
+pipeline {
+  agent any
+
+  options { disableConcurrentBuilds() }
+
+  parameters {
+    booleanParam(name: 'BUILD_ALL', defaultValue: false,
+                 description: 'Build and deploy every service, not only changed ones')
+  }
+
+  triggers { githubPush() }
+
+  environment {
+    ACR_NAME = 'sriramacr2026'                // ← change: your registry name
+    ACR      = 'sriramacr2026.azurecr.io'     // ← change: your registry name
+    RG       = 'rg-app-dev'
+    SERVICES = 'monitor-system'               // ← change: compose service names, comma-separated
+  }
+
+  stages {
+
+    stage('Detect changes') {
+      steps {
+        script {
+          env.TAG = sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
+          def all = env.SERVICES.split(',') as List
+          def selected = []
+          if (params.BUILD_ALL || !env.GIT_PREVIOUS_SUCCESSFUL_COMMIT) {
+            selected = all                         // first run: build everything
+          } else {
+            def files = sh(script: "git diff --name-only ${env.GIT_PREVIOUS_SUCCESSFUL_COMMIT} HEAD",
+                           returnStdout: true).trim()
+            for (s in all) {
+              if (!fileExists("services/${s}")) {
+                if (files) { selected << s }       // Layout 1: service at repo root, any change counts
+              } else if (files.contains("services/${s}/") || files.contains('docker-compose')) {
+                selected << s                      // Layout 2: only its folder or the compose file
+              }
+            }
+          }
+          env.CHANGED = selected.join(',')
+          echo "Version tag: ${env.TAG}"
+          echo "Services to deploy: ${env.CHANGED ?: 'none'}"
+        }
+      }
+    }
+
+    stage('Test') {
+      when { expression { return env.CHANGED != '' } }
+      steps {
+        script {
+          for (s in env.CHANGED.split(',')) {
+            def folder = fileExists("services/${s}") ? "services/${s}" : '.'
+            dir(folder) {
+              sh 'if [ -f Makefile ]; then make test; else echo "No Makefile, skipping tests"; fi'
+            }
+          }
+        }
+      }
+    }
+
+    stage('Build & push images') {
+      when { expression { return env.CHANGED != '' } }
+      steps {
+        sh 'az login --identity --output none'
+        sh 'az extension add -n containerapp --upgrade --only-show-errors'
+        sh 'az acr login -n $ACR_NAME'
+        script {
+          def svcs = env.CHANGED.replace(',', ' ')
+          sh "REGISTRY=${env.ACR} TAG=${env.TAG} docker compose build ${svcs}"
+          sh "REGISTRY=${env.ACR} TAG=${env.TAG} docker compose push ${svcs}"
+        }
+      }
+    }
+
+    stage('Deploy to Azure (dev)') {
+      when { expression { return env.CHANGED != '' } }
+      steps {
+        script {
+          for (s in env.CHANGED.split(',')) {
+            sh "az containerapp update -n ${s} -g ${env.RG} --image ${env.ACR}/${s}:${env.TAG} --output none"
+            echo "Deployed ${s}:${env.TAG}"
+          }
+        }
+      }
+    }
+  }
+
+  post {
+    always { sh 'docker image prune -f || true' }
+    success { echo 'Pipeline finished successfully.' }
+    failure { echo 'Pipeline failed. Open Console Output and see Troubleshooting.' }
+  }
+}
