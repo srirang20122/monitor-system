@@ -67,8 +67,8 @@ pipeline {
         sh 'az acr login -n $ACR_NAME'
         script {
           def svcs = env.CHANGED.replace(',', ' ')
-          sh "REGISTRY=${env.ACR} TAG=${env.TAG} docker compose build ${svcs}"
-          sh "REGISTRY=${env.ACR} TAG=${env.TAG} docker compose push ${svcs}"
+          sh "REGISTRY=${env.ACR} TAG=${env.TAG} docker compose -f backend/docker-compose.yml build ${svcs}"
+          sh "REGISTRY=${env.ACR} TAG=${env.TAG} docker compose -f backend/docker-compose.yml push ${svcs}"
         }
       }
     }
